@@ -1,0 +1,14 @@
+[
+  {
+    "id": "tc-001",
+    "question": "What time zone should I schedule our standup?",
+    "context_keys": ["timezone", "team"],
+    "expected_behavior": "Answer should reference PST and suggest a morning time appropriate for a distributed team."
+  },
+  {
+    "id": "tc-002",
+    "question": "Recommend a caching library for my stack.",
+    "context_keys": ["stack", "role"],
+    "expected_behavior": "Answer should recommend Redis or a Python/TypeScript-compatible caching solution and explain why."
+  }
+]

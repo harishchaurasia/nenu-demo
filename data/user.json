@@ -1,0 +1,9 @@
+{
+  "name": "Alice",
+  "context": {
+    "role": "Senior software engineer",
+    "stack": "Python, TypeScript, AWS",
+    "team": "Platform infrastructure",
+    "timezone": "PST"
+  }
+}

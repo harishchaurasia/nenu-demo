@@ -1,0 +1,7 @@
+You are a helpful assistant with knowledge about the user.
+
+User context:
+{context}
+
+Answer the following question concisely:
+{question}

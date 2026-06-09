@@ -4,19 +4,23 @@
 
 **Goal:** Build a CLI evaluation harness that runs personal-context AI agent prompts against test cases and scores results with an LLM-as-judge.
 
-**Architecture:** A `click` CLI loads a user profile and test cases from JSON, feeds each case through an OpenAI agent call using a versioned prompt template, scores each response with a second LLM judge call, and writes a JSON report. Prompt templates live in `prompts/` as plain text files, versioned by name (e.g. `agent_v1.txt`, `agent_v2.txt`) to support iterative prompt development.
+**Architecture:** Flat package `nenu_demo/` (no `src/`). `agent.py` calls the LLM with a versioned system prompt, `scorer.py` judges each response, `run_eval.py` wires them together with `argparse`. No click.
 
-**Tech Stack:** Python 3.11, OpenAI Python SDK (`openai>=1.0`), `click>=8.1`, `pydantic>=2.0`, `pytest>=8.0`, `pytest-mock>=3.14`
+**Tech Stack:** Python 3.11, OpenAI Python SDK (`openai>=1.0`), `pydantic>=2.0`, `pytest>=8.0`
 
 ---
 
-## Task 1: Project Scaffold
+## Task 1: Scaffold
 
 **Files:**
 - Create: `pyproject.toml`
-- Create: `src/nenu/__init__.py`
+- Create: `nenu_demo/__init__.py`
+- Create: `nenu_demo/__main__.py`
 - Create: `tests/__init__.py`
-- Create: `.env.example`
+- Create: `prompts/v1.txt`
+- Create: `data/user.json`
+- Create: `data/cases.json`
+- Create: `reports/.gitkeep`
 
 - [ ] **Step 1: Write `pyproject.toml`**
 
@@ -26,60 +30,101 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nenu"
+name = "nenu-demo"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-    "click>=8.1",
     "openai>=1.0",
     "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-mock>=3.14",
-]
-
-[project.scripts]
-nenu = "nenu.cli:run"
+dev = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["nenu_demo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 ```
 
-- [ ] **Step 2: Create package stub files**
+- [ ] **Step 2: Create package and test stubs**
 
 ```bash
-mkdir -p src/nenu tests examples prompts
-touch src/nenu/__init__.py tests/__init__.py
+mkdir -p nenu_demo tests data prompts reports
+touch nenu_demo/__init__.py tests/__init__.py reports/.gitkeep
 ```
 
-- [ ] **Step 3: Write `.env.example`**
+- [ ] **Step 3: Write `nenu_demo/__main__.py`**
+
+```python
+from nenu_demo.run_eval import main
+
+main()
+```
+
+- [ ] **Step 4: Write `prompts/v1.txt`**
 
 ```
-OPENAI_API_KEY=sk-...
+You are a helpful assistant with knowledge about the user.
+
+User context:
+{context}
+
+Answer the following question concisely:
+{question}
 ```
 
-- [ ] **Step 4: Install in editable mode**
+- [ ] **Step 5: Write `data/user.json`**
+
+```json
+{
+  "name": "Alice",
+  "context": {
+    "role": "Senior software engineer",
+    "stack": "Python, TypeScript, AWS",
+    "team": "Platform infrastructure",
+    "timezone": "PST"
+  }
+}
+```
+
+- [ ] **Step 6: Write `data/cases.json`**
+
+```json
+[
+  {
+    "id": "tc-001",
+    "question": "What time zone should I schedule our standup?",
+    "context_keys": ["timezone", "team"],
+    "expected_behavior": "Answer should reference PST and suggest a morning time appropriate for a distributed team."
+  },
+  {
+    "id": "tc-002",
+    "question": "Recommend a caching library for my stack.",
+    "context_keys": ["stack", "role"],
+    "expected_behavior": "Answer should recommend Redis or a Python/TypeScript-compatible caching solution and explain why."
+  }
+]
+```
+
+- [ ] **Step 7: Install and verify**
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+python -c "import nenu_demo; print('ok')"
 ```
 
-Expected: no errors, `nenu` command available.
+Expected: `ok`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git init
-git add pyproject.toml src/nenu/__init__.py tests/__init__.py .env.example
-git commit -m "chore: scaffold Python project with click + openai + pydantic"
+git add pyproject.toml nenu_demo/ tests/ prompts/ data/ reports/
+git commit -m "chore: scaffold nenu_demo package with data fixtures and prompt template"
 ```
 
 ---
@@ -87,10 +132,10 @@ git commit -m "chore: scaffold Python project with click + openai + pydantic"
 ## Task 2: Data Models + Test Fixtures
 
 **Files:**
-- Create: `src/nenu/models.py`
+- Create: `nenu_demo/models.py`
 - Create: `tests/conftest.py`
 
-- [ ] **Step 1: Write `src/nenu/models.py`**
+- [ ] **Step 1: Write `nenu_demo/models.py`**
 
 ```python
 from pydantic import BaseModel
@@ -105,14 +150,14 @@ class TestCase(BaseModel):
     id: str
     question: str
     context_keys: list[str]
-    rubric: str
+    expected_behavior: str
 
 
-class CaseResult(BaseModel):
+class Judgment(BaseModel):
     id: str
     question: str
     response: str
-    score: str  # "pass" | "fail"
+    verdict: str  # "pass" | "fail"
     reasoning: str
 
 
@@ -121,14 +166,14 @@ class Report(BaseModel):
     passed: int
     failed: int
     pass_rate: float
-    results: list[CaseResult]
+    judgments: list[Judgment]
 ```
 
 - [ ] **Step 2: Write `tests/conftest.py`**
 
 ```python
 import pytest
-from nenu.models import UserProfile, TestCase
+from nenu_demo.models import UserProfile, TestCase
 
 
 @pytest.fixture
@@ -145,14 +190,14 @@ def test_case():
         id="tc-001",
         question="What time zone should I schedule our standup?",
         context_keys=["timezone"],
-        rubric="Answer should reference PST and suggest a morning time.",
+        expected_behavior="Answer should reference PST and suggest a morning time.",
     )
 ```
 
-- [ ] **Step 3: Verify imports work**
+- [ ] **Step 3: Verify imports**
 
 ```bash
-python -c "from nenu.models import UserProfile, TestCase, CaseResult, Report; print('ok')"
+python -c "from nenu_demo.models import UserProfile, TestCase, Judgment, Report; print('ok')"
 ```
 
 Expected: `ok`
@@ -160,250 +205,84 @@ Expected: `ok`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/nenu/models.py tests/conftest.py
-git commit -m "feat: add Pydantic data models and shared test fixtures"
+git add nenu_demo/models.py tests/conftest.py
+git commit -m "feat: add Pydantic models and shared test fixtures"
 ```
 
 ---
 
-## Task 3: Loader
+## Task 3: Agent
 
 **Files:**
-- Create: `src/nenu/loader.py`
-- Create: `tests/test_loader.py`
+- Create: `nenu_demo/agent.py`
+- Create: `tests/test_agent.py`
 
-- [ ] **Step 1: Write failing tests in `tests/test_loader.py`**
-
-```python
-import json
-import pytest
-from nenu.loader import load_profile, load_test_cases
-from nenu.models import UserProfile, TestCase
-
-
-def test_load_profile(tmp_path):
-    data = {"name": "Alice", "context": {"role": "Engineer", "timezone": "PST"}}
-    path = tmp_path / "profile.json"
-    path.write_text(json.dumps(data))
-
-    profile = load_profile(str(path))
-
-    assert isinstance(profile, UserProfile)
-    assert profile.name == "Alice"
-    assert profile.context["timezone"] == "PST"
-
-
-def test_load_test_cases(tmp_path):
-    data = [
-        {
-            "id": "tc-001",
-            "question": "What time zone?",
-            "context_keys": ["timezone"],
-            "rubric": "Should mention PST",
-        }
-    ]
-    path = tmp_path / "cases.json"
-    path.write_text(json.dumps(data))
-
-    cases = load_test_cases(str(path))
-
-    assert len(cases) == 1
-    assert isinstance(cases[0], TestCase)
-    assert cases[0].id == "tc-001"
-
-
-def test_load_test_cases_multiple(tmp_path):
-    data = [
-        {"id": "tc-001", "question": "Q1", "context_keys": [], "rubric": "R1"},
-        {"id": "tc-002", "question": "Q2", "context_keys": ["role"], "rubric": "R2"},
-    ]
-    path = tmp_path / "cases.json"
-    path.write_text(json.dumps(data))
-
-    cases = load_test_cases(str(path))
-
-    assert len(cases) == 2
-    assert cases[1].id == "tc-002"
-
-
-def test_load_profile_invalid_json(tmp_path):
-    path = tmp_path / "profile.json"
-    path.write_text("not json")
-
-    with pytest.raises(Exception):
-        load_profile(str(path))
-```
-
-- [ ] **Step 2: Run tests to confirm they fail**
-
-```bash
-pytest tests/test_loader.py -v
-```
-
-Expected: `ImportError` or `ModuleNotFoundError` — `loader` doesn't exist yet.
-
-- [ ] **Step 3: Write `src/nenu/loader.py`**
-
-```python
-import json
-from pathlib import Path
-from nenu.models import UserProfile, TestCase
-
-
-def load_profile(path: str) -> UserProfile:
-    data = json.loads(Path(path).read_text())
-    return UserProfile.model_validate(data)
-
-
-def load_test_cases(path: str) -> list[TestCase]:
-    data = json.loads(Path(path).read_text())
-    return [TestCase.model_validate(item) for item in data]
-```
-
-- [ ] **Step 4: Run tests to confirm they pass**
-
-```bash
-pytest tests/test_loader.py -v
-```
-
-Expected: 4 tests PASSED.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/nenu/loader.py tests/test_loader.py
-git commit -m "feat: add JSON loader for user profile and test cases"
-```
-
----
-
-## Task 4: Prompt Templates
-
-**Files:**
-- Create: `prompts/agent_v1.txt`
-- Create: `prompts/judge_v1.txt`
-
-No tests needed — these are static text files consumed by runner/judge.
-
-- [ ] **Step 1: Write `prompts/agent_v1.txt`**
-
-```
-You are a helpful assistant with knowledge about the user.
-
-User context:
-{context}
-
-Answer the following question concisely:
-{question}
-```
-
-- [ ] **Step 2: Write `prompts/judge_v1.txt`**
-
-```
-You are evaluating the quality of an AI assistant's response.
-
-Question: {question}
-
-Response: {response}
-
-Rubric: {rubric}
-
-Evaluate whether the response passes or fails the rubric.
-Respond with exactly this JSON format (no extra text):
-{{"score": "pass", "reasoning": "explanation here"}}
-or
-{{"score": "fail", "reasoning": "explanation here"}}
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add prompts/agent_v1.txt prompts/judge_v1.txt
-git commit -m "feat: add v1 prompt templates for agent and judge"
-```
-
----
-
-## Task 5: Runner
-
-**Files:**
-- Create: `src/nenu/runner.py`
-- Create: `tests/test_runner.py`
-
-- [ ] **Step 1: Write failing tests in `tests/test_runner.py`**
+- [ ] **Step 1: Write failing tests in `tests/test_agent.py`**
 
 ```python
 from unittest.mock import MagicMock
-from nenu.runner import run_case
+from nenu_demo.agent import get_response
 
 
-def test_run_case_returns_response(profile, test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = (
-        "You should schedule for 9am PST."
-    )
-    template = "Context:\n{context}\n\nQuestion: {question}"
+def test_get_response_returns_content(profile, test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = "9am PST works."
 
-    result = run_case(mock_client, profile, test_case, template, "gpt-4o-mini")
+    result = get_response(client, profile, test_case, "C:{context} Q:{question}", "gpt-4o-mini")
 
-    assert result == "You should schedule for 9am PST."
+    assert result == "9am PST works."
 
 
-def test_run_case_injects_context_keys(profile, test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = "ok"
-    template = "Context:\n{context}\n\nQuestion: {question}"
+def test_get_response_injects_context_keys(profile, test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = "ok"
 
-    run_case(mock_client, profile, test_case, template, "gpt-4o-mini")
+    get_response(client, profile, test_case, "C:{context} Q:{question}", "gpt-4o-mini")
 
-    call_args = mock_client.chat.completions.create.call_args
-    prompt = call_args.kwargs["messages"][0]["content"]
+    prompt = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
     assert "PST" in prompt
-    assert "What time zone should I schedule our standup?" in prompt
+    assert test_case.question in prompt
 
 
-def test_run_case_skips_missing_context_keys(profile, test_case):
-    test_case.context_keys = ["nonexistent_key"]
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = "ok"
-    template = "Context:\n{context}\n\nQuestion: {question}"
+def test_get_response_skips_missing_keys(profile, test_case):
+    test_case.context_keys = ["nonexistent"]
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = "ok"
 
-    result = run_case(mock_client, profile, test_case, template, "gpt-4o-mini")
+    result = get_response(client, profile, test_case, "C:{context} Q:{question}", "gpt-4o-mini")
 
-    assert result == "ok"  # doesn't crash on missing keys
+    assert result == "ok"
 
 
-def test_run_case_passes_model(profile, test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = "ok"
-    template = "Context:\n{context}\n\nQuestion: {question}"
+def test_get_response_passes_model(profile, test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = "ok"
 
-    run_case(mock_client, profile, test_case, template, "gpt-4o")
+    get_response(client, profile, test_case, "C:{context} Q:{question}", "gpt-4o")
 
-    call_args = mock_client.chat.completions.create.call_args
-    assert call_args.kwargs["model"] == "gpt-4o"
+    assert client.chat.completions.create.call_args.kwargs["model"] == "gpt-4o"
 ```
 
-- [ ] **Step 2: Run tests to confirm they fail**
+- [ ] **Step 2: Run tests — confirm they fail**
 
 ```bash
-pytest tests/test_runner.py -v
+pytest tests/test_agent.py -v
 ```
 
-Expected: `ImportError` — `runner` doesn't exist yet.
+Expected: `ImportError` — `agent` doesn't exist yet.
 
-- [ ] **Step 3: Write `src/nenu/runner.py`**
+- [ ] **Step 3: Write `nenu_demo/agent.py`**
 
 ```python
 from openai import OpenAI
-from nenu.models import UserProfile, TestCase
+from nenu_demo.models import UserProfile, TestCase
 
 
-def run_case(
+def get_response(
     client: OpenAI,
     profile: UserProfile,
     case: TestCase,
-    template: str,
+    system_prompt: str,
     model: str,
 ) -> str:
     context = "\n".join(
@@ -411,7 +290,7 @@ def run_case(
         for k in case.context_keys
         if k in profile.context
     )
-    prompt = template.format(context=context, question=case.question)
+    prompt = system_prompt.format(context=context, question=case.question)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -419,10 +298,10 @@ def run_case(
     return response.choices[0].message.content
 ```
 
-- [ ] **Step 4: Run tests to confirm they pass**
+- [ ] **Step 4: Run tests — confirm they pass**
 
 ```bash
-pytest tests/test_runner.py -v
+pytest tests/test_agent.py -v
 ```
 
 Expected: 4 tests PASSED.
@@ -430,113 +309,111 @@ Expected: 4 tests PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/nenu/runner.py tests/test_runner.py
-git commit -m "feat: add runner module for agent LLM calls"
+git add nenu_demo/agent.py tests/test_agent.py
+git commit -m "feat: add agent module with get_response"
 ```
 
 ---
 
-## Task 6: Judge
+## Task 4: Scorer
 
 **Files:**
-- Create: `src/nenu/judge.py`
-- Create: `tests/test_judge.py`
+- Create: `nenu_demo/scorer.py`
+- Create: `tests/test_scorer.py`
 
-- [ ] **Step 1: Write failing tests in `tests/test_judge.py`**
+- [ ] **Step 1: Write failing tests in `tests/test_scorer.py`**
 
 ```python
 import json
 from unittest.mock import MagicMock
-from nenu.judge import judge_response
+from nenu_demo.scorer import score_response
 
 
-def test_judge_pass(test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = (
-        json.dumps({"score": "pass", "reasoning": "Correctly mentions PST."})
-    )
-    template = "Q: {question}\nA: {response}\nRubric: {rubric}"
-
-    score, reasoning = judge_response(
-        mock_client, test_case, "Use PST.", template, "gpt-4o-mini"
+def test_score_pass(test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = (
+        json.dumps({"verdict": "pass", "reasoning": "Correctly mentions PST."})
     )
 
-    assert score == "pass"
+    verdict, reasoning = score_response(client, test_case, "Use PST.", "gpt-4o-mini")
+
+    assert verdict == "pass"
     assert reasoning == "Correctly mentions PST."
 
 
-def test_judge_fail(test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = (
-        json.dumps({"score": "fail", "reasoning": "Did not mention timezone."})
-    )
-    template = "Q: {question}\nA: {response}\nRubric: {rubric}"
-
-    score, reasoning = judge_response(
-        mock_client, test_case, "I don't know.", template, "gpt-4o-mini"
+def test_score_fail(test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = (
+        json.dumps({"verdict": "fail", "reasoning": "Missing timezone."})
     )
 
-    assert score == "fail"
+    verdict, reasoning = score_response(client, test_case, "I don't know.", "gpt-4o-mini")
+
+    assert verdict == "fail"
     assert "timezone" in reasoning
 
 
-def test_judge_unparseable_json(test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = (
-        "Sorry, I can't evaluate that."
-    )
-    template = "Q: {question}\nA: {response}\nRubric: {rubric}"
+def test_score_unparseable_json(test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = "not json"
 
-    score, reasoning = judge_response(
-        mock_client, test_case, "response", template, "gpt-4o-mini"
-    )
+    verdict, reasoning = score_response(client, test_case, "response", "gpt-4o-mini")
 
-    assert score == "fail"
+    assert verdict == "fail"
     assert "unparseable" in reasoning
 
 
-def test_judge_missing_keys(test_case):
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value.choices[0].message.content = (
+def test_score_missing_keys(test_case):
+    client = MagicMock()
+    client.chat.completions.create.return_value.choices[0].message.content = (
         json.dumps({"result": "yes"})  # wrong keys
     )
-    template = "Q: {question}\nA: {response}\nRubric: {rubric}"
 
-    score, reasoning = judge_response(
-        mock_client, test_case, "response", template, "gpt-4o-mini"
-    )
+    verdict, reasoning = score_response(client, test_case, "response", "gpt-4o-mini")
 
-    assert score == "fail"
+    assert verdict == "fail"
     assert "unparseable" in reasoning
 ```
 
-- [ ] **Step 2: Run tests to confirm they fail**
+- [ ] **Step 2: Run tests — confirm they fail**
 
 ```bash
-pytest tests/test_judge.py -v
+pytest tests/test_scorer.py -v
 ```
 
-Expected: `ImportError` — `judge` doesn't exist yet.
+Expected: `ImportError` — `scorer` doesn't exist yet.
 
-- [ ] **Step 3: Write `src/nenu/judge.py`**
+- [ ] **Step 3: Write `nenu_demo/scorer.py`**
 
 ```python
 import json
 from openai import OpenAI
-from nenu.models import TestCase
+from nenu_demo.models import TestCase
+
+_JUDGE_TEMPLATE = """\
+You are evaluating an AI assistant's response.
+
+Question: {question}
+Response: {response}
+Expected behavior: {expected_behavior}
+
+Does the response satisfy the expected behavior?
+Reply with exactly this JSON (no other text):
+{{"verdict": "pass", "reasoning": "..."}}
+or
+{{"verdict": "fail", "reasoning": "..."}}"""
 
 
-def judge_response(
+def score_response(
     client: OpenAI,
     case: TestCase,
     response: str,
-    template: str,
     model: str,
 ) -> tuple[str, str]:
-    prompt = template.format(
+    prompt = _JUDGE_TEMPLATE.format(
         question=case.question,
         response=response,
-        rubric=case.rubric,
+        expected_behavior=case.expected_behavior,
     )
     result = client.chat.completions.create(
         model=model,
@@ -545,15 +422,15 @@ def judge_response(
     )
     try:
         data = json.loads(result.choices[0].message.content)
-        return data["score"], data["reasoning"]
+        return data["verdict"], data["reasoning"]
     except (json.JSONDecodeError, KeyError):
         return "fail", "judge response unparseable"
 ```
 
-- [ ] **Step 4: Run tests to confirm they pass**
+- [ ] **Step 4: Run tests — confirm they pass**
 
 ```bash
-pytest tests/test_judge.py -v
+pytest tests/test_scorer.py -v
 ```
 
 Expected: 4 tests PASSED.
@@ -561,52 +438,61 @@ Expected: 4 tests PASSED.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/nenu/judge.py tests/test_judge.py
-git commit -m "feat: add judge module for LLM-as-judge scoring"
+git add nenu_demo/scorer.py tests/test_scorer.py
+git commit -m "feat: add scorer module with LLM-as-judge"
 ```
 
 ---
 
-## Task 7: Reporter
+## Task 5: CLI (run_eval.py)
 
 **Files:**
-- Create: `src/nenu/reporter.py`
-- Create: `tests/test_reporter.py`
+- Create: `nenu_demo/run_eval.py`
+- Create: `tests/test_run_eval.py`
 
-- [ ] **Step 1: Write failing tests in `tests/test_reporter.py`**
+- [ ] **Step 1: Write failing tests in `tests/test_run_eval.py`**
 
 ```python
 import json
-import pytest
-from nenu.reporter import build_report, write_report
-from nenu.models import CaseResult
+import sys
+from unittest.mock import MagicMock, patch
+from nenu_demo.run_eval import load_profile, load_test_cases, build_report
+from nenu_demo.models import Judgment
 
 
-def _result(id: str, score: str) -> CaseResult:
-    return CaseResult(id=id, question="q", response="r", score=score, reasoning="ok")
+def _j(id: str, verdict: str) -> Judgment:
+    return Judgment(id=id, question="q", response="r", verdict=verdict, reasoning="ok")
+
+
+def test_load_profile(tmp_path):
+    data = {"name": "Alice", "context": {"timezone": "PST"}}
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(data))
+
+    profile = load_profile(str(path))
+
+    assert profile.name == "Alice"
+    assert profile.context["timezone"] == "PST"
+
+
+def test_load_test_cases(tmp_path):
+    data = [{"id": "tc-001", "question": "Q?", "context_keys": ["timezone"], "expected_behavior": "Mention PST"}]
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps(data))
+
+    cases = load_test_cases(str(path))
+
+    assert len(cases) == 1
+    assert cases[0].id == "tc-001"
 
 
 def test_build_report_counts():
-    results = [
-        _result("tc-001", "pass"),
-        _result("tc-002", "fail"),
-        _result("tc-003", "pass"),
-    ]
-    report = build_report(results)
+    report = build_report([_j("tc-001", "pass"), _j("tc-002", "fail"), _j("tc-003", "pass")])
 
     assert report.total == 3
     assert report.passed == 2
     assert report.failed == 1
     assert abs(report.pass_rate - 2 / 3) < 0.001
-
-
-def test_build_report_all_pass():
-    results = [_result("tc-001", "pass"), _result("tc-002", "pass")]
-    report = build_report(results)
-
-    assert report.passed == 2
-    assert report.failed == 0
-    assert report.pass_rate == 1.0
 
 
 def test_build_report_empty():
@@ -616,218 +502,119 @@ def test_build_report_empty():
     assert report.pass_rate == 0.0
 
 
-def test_write_report(tmp_path):
-    results = [_result("tc-001", "pass")]
-    report = build_report(results)
-    output_path = str(tmp_path / "report.json")
-
-    write_report(report, output_path)
-
-    data = json.loads((tmp_path / "report.json").read_text())
-    assert data["total"] == 1
-    assert data["passed"] == 1
-    assert data["results"][0]["id"] == "tc-001"
-    assert data["results"][0]["score"] == "pass"
-```
-
-- [ ] **Step 2: Run tests to confirm they fail**
-
-```bash
-pytest tests/test_reporter.py -v
-```
-
-Expected: `ImportError` — `reporter` doesn't exist yet.
-
-- [ ] **Step 3: Write `src/nenu/reporter.py`**
-
-```python
-import json
-from pathlib import Path
-from nenu.models import CaseResult, Report
-
-
-def build_report(results: list[CaseResult]) -> Report:
-    total = len(results)
-    passed = sum(1 for r in results if r.score == "pass")
-    return Report(
-        total=total,
-        passed=passed,
-        failed=total - passed,
-        pass_rate=passed / total if total > 0 else 0.0,
-        results=results,
-    )
-
-
-def write_report(report: Report, output_path: str) -> None:
-    Path(output_path).write_text(json.dumps(report.model_dump(), indent=2))
-```
-
-- [ ] **Step 4: Run tests to confirm they pass**
-
-```bash
-pytest tests/test_reporter.py -v
-```
-
-Expected: 4 tests PASSED.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/nenu/reporter.py tests/test_reporter.py
-git commit -m "feat: add reporter module to aggregate results and write JSON report"
-```
-
----
-
-## Task 8: CLI + Examples
-
-**Files:**
-- Create: `src/nenu/cli.py`
-- Create: `examples/profile.json`
-- Create: `examples/test_cases.json`
-
-- [ ] **Step 1: Write `examples/profile.json`**
-
-```json
-{
-  "name": "Alice",
-  "context": {
-    "role": "Senior software engineer",
-    "stack": "Python, TypeScript, AWS",
-    "team": "Platform infrastructure",
-    "timezone": "PST"
-  }
-}
-```
-
-- [ ] **Step 2: Write `examples/test_cases.json`**
-
-```json
-[
-  {
-    "id": "tc-001",
-    "question": "What time zone should I schedule our standup?",
-    "context_keys": ["timezone", "team"],
-    "rubric": "Answer should reference PST and suggest a morning time appropriate for a distributed team."
-  },
-  {
-    "id": "tc-002",
-    "question": "Recommend a caching library for my stack.",
-    "context_keys": ["stack", "role"],
-    "rubric": "Answer should recommend Redis or a Python/TypeScript-compatible caching solution and explain why."
-  }
-]
-```
-
-- [ ] **Step 3: Write `src/nenu/cli.py`**
-
-```python
-from pathlib import Path
-
-import click
-from openai import OpenAI
-
-from nenu.loader import load_profile, load_test_cases
-from nenu.judge import judge_response
-from nenu.models import CaseResult
-from nenu.reporter import build_report, write_report
-from nenu.runner import run_case
-
-
-PROMPTS_DIR = Path("prompts")
-
-
-@click.command()
-@click.option("--profile", required=True, type=click.Path(exists=True), help="Path to user profile JSON")
-@click.option("--cases", required=True, type=click.Path(exists=True), help="Path to test cases JSON")
-@click.option("--prompt-version", default="v1", show_default=True, help="Prompt version (e.g. v1, v2)")
-@click.option("--output", default="report.json", show_default=True, help="Output report path")
-@click.option("--model", default="gpt-4o-mini", show_default=True, help="OpenAI model to use")
-def run(profile, cases, prompt_version, output, model):
-    """Run the personal-context AI agent evaluation harness."""
-    client = OpenAI()
-    user_profile = load_profile(profile)
-    test_cases = load_test_cases(cases)
-
-    agent_template = (PROMPTS_DIR / f"agent_{prompt_version}.txt").read_text()
-    judge_template = (PROMPTS_DIR / f"judge_{prompt_version}.txt").read_text()
-
-    results = []
-    for case in test_cases:
-        click.echo(f"  {case.id}  ", nl=False)
-        response = run_case(client, user_profile, case, agent_template, model)
-        score, reasoning = judge_response(client, case, response, judge_template, model)
-        results.append(
-            CaseResult(
-                id=case.id,
-                question=case.question,
-                response=response,
-                score=score,
-                reasoning=reasoning,
-            )
-        )
-        status = click.style("PASS", fg="green") if score == "pass" else click.style("FAIL", fg="red")
-        click.echo(status)
-
-    report = build_report(results)
-    write_report(report, output)
-
-    click.echo(f"\n{report.passed}/{report.total} passed ({report.pass_rate:.0%})")
-    click.echo(f"Report: {output}")
-```
-
-- [ ] **Step 4: Write CLI smoke test**
-
-Add `tests/test_cli.py`:
-
-```python
-import json
-from unittest.mock import MagicMock, patch
-from click.testing import CliRunner
-from nenu.cli import run
-
-
-def test_cli_runs_and_writes_report(tmp_path, monkeypatch):
+def test_main_writes_report(tmp_path, monkeypatch):
     profile_data = {"name": "Alice", "context": {"timezone": "PST"}}
-    cases_data = [{"id": "tc-001", "question": "What tz?", "context_keys": ["timezone"], "rubric": "Mention PST"}]
+    cases_data = [{"id": "tc-001", "question": "What tz?", "context_keys": ["timezone"], "expected_behavior": "Mention PST"}]
+    prompt_text = "C:{context} Q:{question}"
+    output_path = str(tmp_path / "report.json")
 
     (tmp_path / "profile.json").write_text(json.dumps(profile_data))
     (tmp_path / "cases.json").write_text(json.dumps(cases_data))
-    prompts_dir = tmp_path / "prompts"
-    prompts_dir.mkdir()
-    (prompts_dir / "agent_v1.txt").write_text("Context:\n{context}\n\nQ: {question}")
-    (prompts_dir / "judge_v1.txt").write_text("Q: {question}\nA: {response}\nRubric: {rubric}")
-
-    monkeypatch.chdir(tmp_path)  # makes Path("prompts") resolve to tmp_path/prompts
+    (tmp_path / "prompt.txt").write_text(prompt_text)
 
     mock_client = MagicMock()
     mock_client.chat.completions.create.return_value.choices[0].message.content = (
-        json.dumps({"score": "pass", "reasoning": "Mentions PST."})
+        json.dumps({"verdict": "pass", "reasoning": "Good."})
     )
 
-    output_path = str(tmp_path / "report.json")
-    with patch("nenu.cli.OpenAI", return_value=mock_client):
-        result = CliRunner().invoke(run, [
-            "--profile", str(tmp_path / "profile.json"),
-            "--cases", str(tmp_path / "cases.json"),
-            "--output", output_path,
-        ])
+    monkeypatch.setattr(sys, "argv", [
+        "run_eval",
+        "--profile", str(tmp_path / "profile.json"),
+        "--cases", str(tmp_path / "cases.json"),
+        "--prompt", str(tmp_path / "prompt.txt"),
+        "--output", output_path,
+    ])
 
-    assert result.exit_code == 0, result.output
+    with patch("nenu_demo.run_eval.OpenAI", return_value=mock_client):
+        from nenu_demo.run_eval import main
+        main()
+
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["total"] == 1
     assert report["passed"] == 1
 ```
 
-- [ ] **Step 5: Verify the CLI help text works**
+- [ ] **Step 2: Run tests — confirm they fail**
 
 ```bash
-nenu --help
+pytest tests/test_run_eval.py -v
 ```
 
-Expected: shows profile, cases, prompt-version, output, model options (no prompts-dir).
+Expected: `ImportError` — `run_eval` doesn't exist yet.
 
-- [ ] **Step 6: Run all tests**
+- [ ] **Step 3: Write `nenu_demo/run_eval.py`**
+
+```python
+import argparse
+import json
+from datetime import datetime
+from pathlib import Path
+
+from openai import OpenAI
+
+from nenu_demo.agent import get_response
+from nenu_demo.models import Judgment, Report, TestCase, UserProfile
+from nenu_demo.scorer import score_response
+
+
+def load_profile(path: str) -> UserProfile:
+    return UserProfile.model_validate(json.loads(Path(path).read_text()))
+
+
+def load_test_cases(path: str) -> list[TestCase]:
+    return [TestCase.model_validate(item) for item in json.loads(Path(path).read_text())]
+
+
+def build_report(judgments: list[Judgment]) -> Report:
+    total = len(judgments)
+    passed = sum(1 for j in judgments if j.verdict == "pass")
+    return Report(
+        total=total,
+        passed=passed,
+        failed=total - passed,
+        pass_rate=passed / total if total > 0 else 0.0,
+        judgments=judgments,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run personal-context AI agent eval")
+    parser.add_argument("--profile", required=True, help="Path to user profile JSON")
+    parser.add_argument("--cases", required=True, help="Path to test cases JSON")
+    parser.add_argument("--prompt", required=True, help="Path to agent system prompt")
+    parser.add_argument("--model", default="gpt-4o-mini", help="OpenAI model (default: gpt-4o-mini)")
+    parser.add_argument("--output", default=None, help="Output path (default: reports/<timestamp>.json)")
+    args = parser.parse_args()
+
+    client = OpenAI()
+    profile = load_profile(args.profile)
+    cases = load_test_cases(args.cases)
+    system_prompt = Path(args.prompt).read_text()
+    output_path = args.output or f"reports/{datetime.now().strftime('%Y%m%dT%H%M%S')}.json"
+
+    judgments = []
+    for case in cases:
+        print(f"  {case.id}  ", end="", flush=True)
+        response = get_response(client, profile, case, system_prompt, args.model)
+        verdict, reasoning = score_response(client, case, response, args.model)
+        judgments.append(Judgment(
+            id=case.id,
+            question=case.question,
+            response=response,
+            verdict=verdict,
+            reasoning=reasoning,
+        ))
+        print(verdict.upper())
+
+    report = build_report(judgments)
+    Path(output_path).parent.mkdir(exist_ok=True)
+    Path(output_path).write_text(json.dumps(report.model_dump(), indent=2))
+
+    print(f"\n{report.passed}/{report.total} passed ({report.pass_rate:.0%})")
+    print(f"Report: {output_path}")
+```
+
+- [ ] **Step 4: Run all tests — confirm they pass**
 
 ```bash
 pytest -v
@@ -835,100 +622,50 @@ pytest -v
 
 Expected: all tests PASSED.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Smoke-test the help output**
 
 ```bash
-git add src/nenu/cli.py tests/test_cli.py examples/profile.json examples/test_cases.json
-git commit -m "feat: add CLI entry point, smoke test, and example fixtures"
+python -m nenu_demo --help
+```
+
+Expected: shows `--profile`, `--cases`, `--prompt`, `--model`, `--output`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add nenu_demo/run_eval.py tests/test_run_eval.py
+git commit -m "feat: add run_eval CLI with argparse, loader, and report writer"
 ```
 
 ---
 
-## Task 9: Update CLAUDE.md
+## Task 6: Commit CLAUDE.md
 
-**Files:**
-- Modify: `CLAUDE.md`
-
-- [ ] **Step 1: Replace CLAUDE.md with final content**
-
-```markdown
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-`nenu` is a CLI evaluation harness for personal-context AI agents. It runs test cases against a user profile using an OpenAI agent prompt, scores each response with an LLM-as-judge, and outputs a JSON report.
-
-## Setup
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-export OPENAI_API_KEY=sk-...
-```
-
-## Running the Harness
-
-```bash
-nenu --profile examples/profile.json --cases examples/test_cases.json
-```
-
-To test a new prompt version:
-
-```bash
-# Create prompts/agent_v2.txt (edit prompt, copy judge template)
-cp prompts/judge_v1.txt prompts/judge_v2.txt
-nenu --profile examples/profile.json --cases examples/test_cases.json --prompt-version v2 --output report_v2.json
-```
-
-## Tests
-
-```bash
-pytest                                         # all tests
-pytest tests/test_runner.py -v                 # single file
-pytest tests/test_runner.py::test_run_case_returns_response  # single test
-```
-
-Tests use `unittest.mock.MagicMock` to mock the OpenAI client — no real API calls in tests.
-
-## Architecture
-
-- `src/nenu/models.py` — Pydantic models: `UserProfile`, `TestCase`, `CaseResult`, `Report`
-- `src/nenu/loader.py` — reads and validates JSON inputs
-- `src/nenu/runner.py` — one OpenAI call per test case (agent role)
-- `src/nenu/judge.py` — one OpenAI call per result (judge role), parses `{"score", "reasoning"}`
-- `src/nenu/reporter.py` — aggregates `CaseResult` list into `Report`, writes JSON
-- `src/nenu/cli.py` — click entry point, wires loader → runner → judge → reporter
-- `prompts/` — versioned prompt templates; `{context}` and `{question}` placeholders for agent; `{question}`, `{response}`, `{rubric}` for judge
-```
-
-- [ ] **Step 2: Commit**
+- [ ] **Step 1: Commit the already-updated CLAUDE.md**
 
 ```bash
 git add CLAUDE.md
-git commit -m "docs: update CLAUDE.md with final commands and architecture"
+git commit -m "docs: add CLAUDE.md with architecture, data flow, and conventions"
 ```
 
 ---
 
 ## Self-Review
 
-**Spec coverage check:**
-- ✅ CLI tool in Python with click
+**Spec coverage:**
+- ✅ CLI tool in Python with argparse (no click)
 - ✅ Loads user profile (JSON) and test cases (JSON)
-- ✅ Feeds question + relevant context to LLM (runner.py)
-- ✅ Scores with LLM-as-judge against rubric (judge.py)
-- ✅ Outputs JSON report with pass/fail and reasoning per case (reporter.py + cli.py)
-- ✅ Prompt versioning via `--prompt-version` flag for iteration workflow
-- ✅ OpenAI Python SDK used throughout
+- ✅ Feeds question + relevant context to LLM (`agent.py`)
+- ✅ Scores with LLM-as-judge against `expected_behavior` (`scorer.py`)
+- ✅ JSON report with pass/fail and reasoning per case (`reports/<timestamp>.json`)
+- ✅ Prompt versioning via `--prompt prompts/v1.txt` for iteration
+- ✅ Flat layout — `nenu_demo/` package, no `src/` prefix
+- ✅ Pydantic v2 models: `UserProfile`, `TestCase`, `Judgment`, `Report`
 
-**Placeholder scan:** None found — all steps contain complete code.
+**Placeholder scan:** None — all steps contain complete code.
 
 **Type consistency:**
-- `UserProfile.context: dict[str, str]` — used in runner.py context injection ✅
-- `TestCase.context_keys: list[str]` — used in runner.py loop ✅
-- `judge_response` returns `tuple[str, str]` — destructured in cli.py as `score, reasoning` ✅
-- `build_report` takes `list[CaseResult]` — cli.py builds `results: list[CaseResult]` ✅
-- `write_report` takes `Report` — receives return value of `build_report` ✅
+- `get_response(...) -> str` consumed in `run_eval.py` as `response` ✅
+- `score_response(...) -> tuple[str, str]` destructured as `verdict, reasoning` ✅
+- `build_report(list[Judgment]) -> Report` — `judgments` list built in `main()` ✅
+- `TestCase.expected_behavior` — used in `_JUDGE_TEMPLATE` in `scorer.py` ✅
